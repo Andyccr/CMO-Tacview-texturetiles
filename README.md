@@ -46,6 +46,14 @@ python -m cmo_tacview_tiles theaters
 
 # 先看会下哪些瓦片
 python -m cmo_tacview_tiles list --theater taiwan
+python -m cmo_tacview_tiles list --theater taiwan --pad 1 --map
+
+# 按战区下载（推荐）
+python -m cmo_tacview_tiles download --theater taiwan -o ./tacview_textures
+
+# 覆盖情况（本地文件 + 目录缓存）
+python -m cmo_tacview_tiles status --theater taiwan -o ./tacview_textures --map
+python -m cmo_tacview_tiles verify -o ./tacview_textures
 
 # 按战区下载（推荐）
 python -m cmo_tacview_tiles download --theater taiwan -o ./tacview_textures
@@ -65,11 +73,11 @@ python -m cmo_tacview_tiles install --source ./tacview_textures --target "D:/Tac
 
 CMO 里看光标经纬度，取场景西南–东北两个角，填进 `--bbox` 即可。缺省一次最多 400 张，可用 `--max-tiles` 调整；默认 4 个并发，避免打满官方带宽。
 
-已下载且大小一致的文件会跳过，中断的 `.part` 会断点续传。404 是正常现象（海上或未发布的格子），会记成 `missing` 而不是失败。
+已下载且大小一致的文件会跳过，中断的 `.part` 会断点续传。404 是正常现象（海上或未发布的格子），会记成 `missing` 而不是失败，并写入输出目录里的 `.cmo_tiles_catalog.json`，下次不再重复探测。`--pad 1` 会多下一圈相邻格子。`--trust-local` 对已有文件跳过 HEAD。
 
 ### 内置战区
 
-`taiwan` `korea` `japan-south` `hokkaido` `scs-north` `spratly` `philippines` `malacca` `guam` `hormuz` `persian-gulf` `red-sea` `levant` `black-sea` `ukraine` `baltic` `giuk` `iceland` `norway` `uk-north` `gibraltar` `med-central` `falklands` `hawaii` `california` `caribbean` `india-west` `india-east`
+`taiwan` `korea` `japan-south` `hokkaido` `scs-north` `spratly` `philippines` `malacca` `guam` `hormuz` `persian-gulf` `red-sea` `levant` `black-sea` `ukraine` `baltic` `giuk` `iceland` `norway` `uk-north` `gibraltar` `med-central` `falklands` `hawaii` `california` `caribbean` `india-west` `india-east` `okinawa` `aden` `suwalki`
 
 完整表：`python -m cmo_tacview_tiles theaters`
 
@@ -89,10 +97,11 @@ This release:
 - Generates SRTM 1° names from a theater preset, bounding box, or explicit list
 - Downloads concurrently with a small default worker count
 - Skips complete files, resumes `.part` files, retries transient HTTP errors
-- Treats 404 as “tile not published”, not as a hard failure
+- Treats 404 as “tile not published”, not as a hard failure, and caches that in `.cmo_tiles_catalog.json`
+- `status` / `verify` / ASCII `--map` / GeoJSON for coverage
+- `--pad` expands a theater by neighbouring 1° cells
 - Refuses oversized jobs (`--max-tiles`, default 400)
 - Copies tiles into Tacview/CMO folders (`install`)
-- Drops the unrelated Hexo→Hugo converter that had landed in this repo
 
 ### Install
 
@@ -148,6 +157,14 @@ Sims / Slitherine and licensed **only for use with CMO**. This repository is
 just the downloader (MIT).
 
 ### Changelog
+
+**2.1.0**
+
+- Sidecar catalog remembers unpublished (404) tiles so later runs do not re-probe them
+- `status`, `verify`, `list --check`, ASCII `--map`, and GeoJSON coverage
+- `--pad`, `--trust-local`, `--retry-failed`, `--refresh-missing`
+- Concurrent `probe` with the same theater/bbox selectors as download
+- Extra theaters: `okinawa`, `aden`, `suwalki`
 
 **2.0.0**
 

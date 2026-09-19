@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import os
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, List, Sequence
 
-from .constants import CMO_TEXTURE_RELATIVE, WINDOWS_TEXTURE_RELATIVE
+from .constants import CATALOG_FILENAME, CMO_TEXTURE_RELATIVE, WINDOWS_TEXTURE_RELATIVE
 
 
 @dataclass(frozen=True)
@@ -23,14 +23,8 @@ class InstallSummary:
     copied: int = 0
     skipped: int = 0
     failed: int = 0
-    targets: List[Path] = None  # type: ignore[assignment]
-    errors: List[str] = None  # type: ignore[assignment]
-
-    def __post_init__(self) -> None:
-        if self.targets is None:
-            self.targets = []
-        if self.errors is None:
-            self.errors = []
+    targets: List[Path] = field(default_factory=list)
+    errors: List[str] = field(default_factory=list)
 
 
 def discover_targets() -> List[InstallTarget]:
@@ -91,6 +85,7 @@ def list_texture_files(source: Path) -> List[Path]:
         p
         for p in source.iterdir()
         if p.is_file() and p.suffix.lower() == ".webp" and not p.name.endswith(".part")
+        and p.name != CATALOG_FILENAME
     )
     return files
 

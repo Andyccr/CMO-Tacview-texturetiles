@@ -51,10 +51,12 @@ def thread_session(
     user_agent: str = USER_AGENT,
 ) -> requests.Session:
     """Return a per-thread session (requests.Session is not thread-safe)."""
+    key = (retries, timeout, user_agent)
     session: Optional[requests.Session] = getattr(_THREAD_LOCAL, "session", None)
-    if session is None:
+    if session is None or getattr(_THREAD_LOCAL, "key", None) != key:
         session = build_session(retries=retries, timeout=timeout, user_agent=user_agent)
         _THREAD_LOCAL.session = session
+        _THREAD_LOCAL.key = key
     return session
 
 
