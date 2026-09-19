@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
-from typing import Iterable, Iterator, List, Sequence
+from typing import Iterable, List, Sequence
 from urllib.parse import urljoin
 
 TILE_NAME_RE = re.compile(
@@ -191,8 +191,3 @@ def merge_tiles(*groups: Iterable[Tile]) -> List[Tile]:
     for group in groups:
         combined.extend(group)
     return unique_tiles(combined)
-
-
-def iter_filenames(tiles: Iterable[Tile]) -> Iterator[str]:
-    for tile in tiles:
-        yield tile.filename

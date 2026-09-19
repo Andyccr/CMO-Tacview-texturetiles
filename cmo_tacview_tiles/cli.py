@@ -204,7 +204,8 @@ def _add_selection_args(parser: argparse.ArgumentParser) -> None:
         action="append",
         default=[],
         metavar="S,W,N,E",
-        help="bounding box south,west,north,east in degrees (repeatable)",
+        help="bounding box south,west,north,east in degrees (repeatable). "
+        "If a value is negative write --bbox=-2,-70,8,-60",
     )
     parser.add_argument(
         "--tiles",
@@ -219,9 +220,30 @@ def _add_selection_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _glue_negative_option_values(argv: Sequence[str]) -> List[str]:
+    """Allow ``--bbox -2,-70,8,-60`` which argparse would otherwise treat as flags."""
+    glued: List[str] = []
+    i = 0
+    while i < len(argv):
+        current = argv[i]
+        if (
+            current == "--bbox"
+            and i + 1 < len(argv)
+            and argv[i + 1].startswith("-")
+            and not argv[i + 1].startswith("--")
+        ):
+            glued.append(f"--bbox={argv[i + 1]}")
+            i += 2
+            continue
+        glued.append(current)
+        i += 1
+    return glued
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(list(argv) if argv is not None else None)
+    raw = list(argv) if argv is not None else sys.argv[1:]
+    args = parser.parse_args(_glue_negative_option_values(raw))
     try:
         return int(args.handler(args, sys.stdout, sys.stderr))
     except TileError as exc:

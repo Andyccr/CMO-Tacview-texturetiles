@@ -9,7 +9,7 @@ from tests.helpers import make_webp
 
 def test_download_ok_and_missing(tile_server, tmp_path: Path) -> None:
     summary = download_tiles(
-        [parse_tile_name("N25E121"), parse_tile_name("N99E001")],
+        [parse_tile_name("N25E121"), parse_tile_name("N10E010")],
         tmp_path,
         base_url=tile_server.base_url,
         workers=2,
