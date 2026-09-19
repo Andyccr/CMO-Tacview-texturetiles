@@ -40,7 +40,7 @@ def test_download_limit_from_local_server(tile_server, tmp_path: Path, capsys) -
         [
             "download",
             "--tiles",
-            "N25E121,N99E001",
+            "N25E121,N10E010",
             "--output",
             str(tmp_path),
             "--base-url",
@@ -57,6 +57,13 @@ def test_download_limit_from_local_server(tile_server, tmp_path: Path, capsys) -
     assert "downloaded=1" in captured.out
     assert "missing=1" in captured.out
     assert (tmp_path / "N25E121.webp").exists()
+
+
+def test_bbox_accepts_leading_minus(capsys) -> None:
+    assert main(["list", "--bbox", "-2,-70,1,-68"]) == 0
+    out = capsys.readouterr().out
+    assert "S02W070.webp" in out
+    assert "N01W068.webp" in out
 
 
 def test_download_refuses_over_max_tiles(capsys) -> None:
@@ -87,6 +94,23 @@ def test_install_copies(tmp_path: Path, capsys) -> None:
     assert (dest / "N25E121.webp").exists()
     assert not (dest / "readme.txt").exists()
     assert "copied=1" in capsys.readouterr().out
+
+
+def test_probe_local_server(tile_server, capsys) -> None:
+    code = main(
+        [
+            "probe",
+            "N25E121",
+            "N10E010",
+            "--base-url",
+            tile_server.base_url,
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "N25E121" in out
+    assert "ok" in out
+    assert "missing" in out
 
 
 def test_unknown_theater(capsys) -> None:
