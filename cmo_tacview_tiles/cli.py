@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import List, Optional, Sequence, TextIO
 
 from . import __version__
+from .catalog import Catalog, scan_local, verify_files
 from .constants import (
     DEFAULT_BASE_URL,
     DEFAULT_CONFIRM_AFTER,
@@ -18,30 +19,12 @@ from .constants import (
     DEFAULT_TIMEOUT,
     DEFAULT_WORKERS,
 )
-from .downloader import DownloadResult, DownloadSummary, download_tiles
-from .install import (
-    discover_targets,
-    format_target_help,
-    install_textures,
-)
-from .theaters import THEATERS, find_theaters, get_theater
-from .tiles import (
-    Tile,
-    TileError,
-    merge_tiles,
-    parse_bbox,
-    parse_tile_list,
-    parse_tile_name,
-    tiles_from_bbox,
-)
-
-
-class CliError(SystemExit):
-    """Abort the CLI with a non-zero status and a message."""
-
-    def __init__(self, message: str, code: int = 2) -> None:
-        super().__init__(code)
-        self.message = message
+from .coverage import classify_tile, render_map, tiles_geojson
+from .downloader import DownloadResult, download_tiles, probe_tiles
+from .install import discover_targets, format_target_help, install_textures
+from .selection import SelectionRequest, resolve_selection
+from .tiles import Tile, TileError, merge_tiles
+from .util import format_bytes, glue_negative_option_values
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -89,102 +72,72 @@ def build_parser() -> argparse.ArgumentParser:
     list_p = sub.add_parser("list", help="show tiles for a theater or bounding box")
     _add_selection_args(list_p)
     list_p.add_argument("--json", action="store_true", help="JSON output")
+    list_p.add_argument(
+        "--check",
+        action="store_true",
+        help="HEAD each tile (uses the catalog to skip known 404s)",
+    )
+    list_p.add_argument("-o", "--output", default=DEFAULT_OUTPUT_DIR, help="catalog folder")
+    list_p.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    list_p.add_argument("-w", "--workers", type=int, default=DEFAULT_WORKERS)
+    list_p.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
+    list_p.add_argument("--retries", type=int, default=DEFAULT_RETRIES)
+    list_p.add_argument("--refresh-missing", action="store_true")
+    list_p.add_argument("--map", action="store_true", help="print an ASCII coverage grid")
     list_p.set_defaults(handler=_cmd_list)
 
     dl = sub.add_parser("download", help="download selected tiles")
     _add_selection_args(dl)
-    dl.add_argument(
-        "-o",
-        "--output",
-        default=DEFAULT_OUTPUT_DIR,
-        help=f"output folder (default: {DEFAULT_OUTPUT_DIR})",
-    )
-    dl.add_argument(
-        "-w",
-        "--workers",
-        type=int,
-        default=DEFAULT_WORKERS,
-        help=f"parallel downloads (default: {DEFAULT_WORKERS}; keep this modest)",
-    )
-    dl.add_argument(
-        "--timeout",
-        type=float,
-        default=DEFAULT_TIMEOUT,
-        help=f"per-request timeout seconds (default: {DEFAULT_TIMEOUT:g})",
-    )
-    dl.add_argument(
-        "--retries",
-        type=int,
-        default=DEFAULT_RETRIES,
-        help=f"HTTP retries (default: {DEFAULT_RETRIES})",
-    )
-    dl.add_argument(
-        "--base-url",
-        default=DEFAULT_BASE_URL,
-        help="tile URL prefix",
-    )
-    dl.add_argument(
-        "--max-tiles",
-        type=int,
-        default=DEFAULT_MAX_TILES,
-        help=f"refuse jobs larger than this (default: {DEFAULT_MAX_TILES})",
-    )
-    dl.add_argument(
-        "--yes",
-        "-y",
-        action="store_true",
-        help="do not ask for confirmation on large jobs",
-    )
-    dl.add_argument(
-        "--force",
-        action="store_true",
-        help="re-download tiles even if the local file size already matches",
-    )
-    dl.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="resolve tiles but do not hit the network",
-    )
-    dl.add_argument(
-        "--limit",
-        type=int,
-        default=0,
-        help="download at most N tiles (useful for testing)",
-    )
+    dl.add_argument("-o", "--output", default=DEFAULT_OUTPUT_DIR, help=f"output folder (default: {DEFAULT_OUTPUT_DIR})")
+    dl.add_argument("-w", "--workers", type=int, default=DEFAULT_WORKERS, help=f"parallel downloads (default: {DEFAULT_WORKERS})")
+    dl.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
+    dl.add_argument("--retries", type=int, default=DEFAULT_RETRIES)
+    dl.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    dl.add_argument("--max-tiles", type=int, default=DEFAULT_MAX_TILES)
+    dl.add_argument("-y", "--yes", action="store_true", help="do not ask for confirmation on large jobs")
+    dl.add_argument("--force", action="store_true", help="re-download even if size already matches")
+    dl.add_argument("--dry-run", action="store_true", help="resolve tiles but do not hit the network")
+    dl.add_argument("--limit", type=int, default=0, help="download at most N tiles")
+    dl.add_argument("--trust-local", action="store_true", help="skip existing files without a HEAD request")
+    dl.add_argument("--refresh-missing", action="store_true", help="re-probe tiles the catalog marked 404")
+    dl.add_argument("--retry-failed", action="store_true", help="include tiles the catalog marked failed")
+    dl.add_argument("--no-catalog", action="store_true", help="do not read or write the sidecar catalog")
+    dl.add_argument("--json", action="store_true", help="print the summary as JSON")
+    dl.add_argument("-q", "--quiet", action="store_true", help="print only the final summary")
     dl.set_defaults(handler=_cmd_download)
 
-    probe = sub.add_parser("probe", help="check whether named tiles exist on the host")
-    probe.add_argument("tiles", nargs="+", help="tile names, e.g. N25E121")
+    probe = sub.add_parser("probe", help="check whether tiles exist on the host")
+    probe.add_argument("names", nargs="*", help="tile names, e.g. N25E121")
+    _add_selection_args(probe)
     probe.add_argument("--base-url", default=DEFAULT_BASE_URL)
     probe.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
+    probe.add_argument("--retries", type=int, default=DEFAULT_RETRIES)
+    probe.add_argument("-w", "--workers", type=int, default=DEFAULT_WORKERS)
+    probe.add_argument("-o", "--output", default=DEFAULT_OUTPUT_DIR, help="catalog folder")
+    probe.add_argument("--refresh-missing", action="store_true")
+    probe.add_argument("--no-catalog", action="store_true")
     probe.add_argument("--json", action="store_true")
     probe.set_defaults(handler=_cmd_probe)
 
+    status = sub.add_parser("status", help="compare a theater against local files and the catalog")
+    _add_selection_args(status)
+    status.add_argument("-o", "--output", default=DEFAULT_OUTPUT_DIR)
+    status.add_argument("--json", action="store_true")
+    status.add_argument("--map", action="store_true", help="print an ASCII coverage grid")
+    status.add_argument("--geojson", action="store_true", help="print a GeoJSON FeatureCollection")
+    status.set_defaults(handler=_cmd_status)
+
+    ver = sub.add_parser("verify", help="check local WebP files for truncated or corrupt data")
+    ver.add_argument("-o", "--output", default=DEFAULT_OUTPUT_DIR)
+    ver.add_argument("--json", action="store_true")
+    ver.set_defaults(handler=_cmd_verify)
+
     inst = sub.add_parser("install", help="copy downloaded tiles into Tacview/CMO folders")
-    inst.add_argument(
-        "-s",
-        "--source",
-        default=DEFAULT_OUTPUT_DIR,
-        help=f"folder of .webp files (default: {DEFAULT_OUTPUT_DIR})",
-    )
-    inst.add_argument(
-        "-t",
-        "--target",
-        action="append",
-        default=[],
-        help="destination folder (repeatable). Default: autodetect on Windows",
-    )
+    inst.add_argument("-s", "--source", default=DEFAULT_OUTPUT_DIR, help=f"folder of .webp files (default: {DEFAULT_OUTPUT_DIR})")
+    inst.add_argument("-t", "--target", action="append", default=[], help="destination folder (repeatable)")
     inst.add_argument("--dry-run", action="store_true")
-    inst.add_argument(
-        "--no-overwrite",
-        action="store_true",
-        help="leave existing destination files untouched",
-    )
-    inst.add_argument(
-        "--list-targets",
-        action="store_true",
-        help="print detected Tacview folders and exit",
-    )
+    inst.add_argument("--no-overwrite", action="store_true")
+    inst.add_argument("--list-targets", action="store_true")
     inst.set_defaults(handler=_cmd_install)
 
     return parser
@@ -218,32 +171,18 @@ def _add_selection_args(parser: argparse.ArgumentParser) -> None:
         dest="from_file",
         help="text file with one tile name per line",
     )
-
-
-def _glue_negative_option_values(argv: Sequence[str]) -> List[str]:
-    """Allow ``--bbox -2,-70,8,-60`` which argparse would otherwise treat as flags."""
-    glued: List[str] = []
-    i = 0
-    while i < len(argv):
-        current = argv[i]
-        if (
-            current == "--bbox"
-            and i + 1 < len(argv)
-            and argv[i + 1].startswith("-")
-            and not argv[i + 1].startswith("--")
-        ):
-            glued.append(f"--bbox={argv[i + 1]}")
-            i += 2
-            continue
-        glued.append(current)
-        i += 1
-    return glued
+    parser.add_argument(
+        "--pad",
+        type=int,
+        default=0,
+        help="expand the selection by N degrees of neighbouring tiles",
+    )
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     raw = list(argv) if argv is not None else sys.argv[1:]
-    args = parser.parse_args(_glue_negative_option_values(raw))
+    args = parser.parse_args(glue_negative_option_values(raw))
     try:
         return int(args.handler(args, sys.stdout, sys.stderr))
     except TileError as exc:
@@ -255,12 +194,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except KeyboardInterrupt:
         print("\ninterrupted", file=sys.stderr)
         return 130
-    except CliError as exc:
-        print(f"error: {exc.message}", file=sys.stderr)
-        return int(exc.code)
+    except FileNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
 
 def _cmd_theaters(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    from .theaters import find_theaters
+
     rows = find_theaters(args.query)
     if args.json:
         payload = [
@@ -302,7 +243,51 @@ def _cmd_theaters(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
 
 
 def _cmd_list(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
-    tiles = _resolve_tiles(args)
+    tiles = resolve_selection(SelectionRequest.from_args(args))
+    catalog = Catalog.load(Path(args.output)) if args.check else None
+    states = {}
+    if args.check:
+        probed = probe_tiles(
+            tiles,
+            base_url=args.base_url,
+            workers=args.workers,
+            timeout=args.timeout,
+            retries=args.retries,
+            catalog=catalog,
+            skip_known_missing=not args.refresh_missing,
+        )
+        if catalog is not None:
+            catalog.save()
+        rows = [
+            {
+                "tile": p.tile.name,
+                "status": p.status,
+                "bytes": p.bytes,
+                "cached": p.cached,
+            }
+            for p in probed
+        ]
+        states = {
+            p.tile.name: {
+                "ok": "present",
+                "missing": "unpublished",
+                "fail": "failed",
+            }.get(p.status, "unknown")
+            for p in probed
+        }
+        if args.json:
+            json.dump(rows, out, indent=2)
+            out.write("\n")
+        else:
+            print(f"{len(tiles)} tile(s)", file=out)
+            for p in probed:
+                extra = f"  {format_bytes(p.bytes)}" if p.bytes else ""
+                cached = "  cached" if p.cached else ""
+                print(f"{p.status:<7} {p.tile.filename}{extra}{cached}", file=out)
+        if args.map and not args.json:
+            print(render_map(tiles, states), file=out)
+        return 0 if all(p.status != "fail" for p in probed) else 1
+
     if args.json:
         json.dump([t.name for t in tiles], out, indent=2)
         out.write("\n")
@@ -310,11 +295,34 @@ def _cmd_list(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     print(f"{len(tiles)} tile(s)", file=out)
     for tile in tiles:
         print(tile.filename, file=out)
+    if args.map:
+        local = scan_local(Path(args.output))
+        catalog = Catalog.load(Path(args.output))
+        states = {
+            t.name: classify_tile(
+                t,
+                local=local,
+                catalog_status=(catalog.get(t).status if catalog.get(t) else None),
+            )
+            for t in tiles
+        }
+        print(render_map(tiles, states), file=out)
     return 0
 
 
 def _cmd_download(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
-    tiles = _resolve_tiles(args)
+    request = SelectionRequest.from_args(args)
+    output = Path(args.output)
+    catalog = None if args.no_catalog else Catalog.load(output)
+
+    tiles: List[Tile] = []
+    if not request.is_empty():
+        tiles = resolve_selection(request)
+    if args.retry_failed:
+        if catalog is None:
+            print("error: --retry-failed needs the catalog (omit --no-catalog)", file=err)
+            return 2
+        tiles = merge_tiles(tiles, catalog.failed_tiles())
     if args.limit and args.limit > 0:
         tiles = tiles[: args.limit]
     if not tiles:
@@ -329,25 +337,26 @@ def _cmd_download(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
         )
         return 2
 
-    output = Path(args.output)
-    print(f"tiles: {len(tiles)}  output: {output}  workers: {args.workers}", file=out)
+    if not args.json:
+        print(f"tiles: {len(tiles)}  output: {output}  workers: {args.workers}", file=out)
     if not args.yes and not args.dry_run and len(tiles) >= DEFAULT_CONFIRM_AFTER:
         if not _confirm(f"Download {len(tiles)} tiles now? [y/N] ", err):
             print("aborted", file=err)
             return 1
 
-    quiet = bool(args.quiet)
+    quiet = bool(args.quiet) or bool(args.json)
 
     def on_result(result: DownloadResult, current: int, total: int) -> None:
         if quiet:
             return
         extra = ""
         if result.status == "ok":
-            extra = f"  {_format_bytes(result.bytes_written)}"
+            extra = f"  {format_bytes(result.bytes_written)}"
         elif result.error:
             extra = f"  {result.error}"
+        cached = "  cached" if result.cached else ""
         print(
-            f"[{current:4d}/{total}] {result.status:<7} {result.tile.filename}{extra}",
+            f"[{current:4d}/{total}] {result.status:<7} {result.tile.filename}{extra}{cached}",
             file=out,
         )
 
@@ -361,40 +370,126 @@ def _cmd_download(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
         skip_existing=not args.force,
         force=args.force,
         dry_run=args.dry_run,
+        trust_local=args.trust_local,
+        skip_known_missing=not args.refresh_missing,
+        catalog=catalog,
         on_result=on_result,
     )
-    _print_summary(summary, out)
+    if catalog is not None and not args.dry_run:
+        catalog.save()
+    if args.json:
+        json.dump(summary.to_dict(), out, indent=2)
+        out.write("\n")
+    else:
+        _print_summary(summary, out)
     return 1 if summary.failed else 0
 
 
 def _cmd_probe(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
-    from .downloader import _head_size
-    from .session import build_session, request_timeout
-
-    tiles = parse_tile_list(args.tiles)
-    session = build_session(timeout=args.timeout)
-    tmo = request_timeout(session, args.timeout)
-    rows = []
-    for tile in tiles:
-        url = tile.url(args.base_url)
-        try:
-            size = _head_size(session, url, tmo)
-            status = "missing" if size is None else "ok"
-            rows.append({"tile": tile.name, "status": status, "bytes": size, "url": url})
-        except Exception as exc:  # noqa: BLE001
-            rows.append(
-                {"tile": tile.name, "status": "fail", "error": str(exc), "url": url}
-            )
+    request = SelectionRequest.from_args(args)
+    if args.names:
+        request.tiles = list(request.tiles) + list(args.names)
+    if request.is_empty():
+        print("error: pass tile names or --theater/--bbox/--tiles", file=err)
+        return 2
+    tiles = resolve_selection(request)
+    catalog = None if args.no_catalog else Catalog.load(Path(args.output))
+    rows = probe_tiles(
+        tiles,
+        base_url=args.base_url,
+        workers=args.workers,
+        timeout=args.timeout,
+        retries=args.retries,
+        catalog=catalog,
+        skip_known_missing=not args.refresh_missing,
+    )
+    if catalog is not None:
+        catalog.save()
     if args.json:
-        json.dump(rows, out, indent=2)
+        json.dump(
+            [
+                {
+                    "tile": r.tile.name,
+                    "status": r.status,
+                    "bytes": r.bytes,
+                    "etag": r.etag,
+                    "cached": r.cached,
+                    "url": r.url,
+                    "error": r.error,
+                }
+                for r in rows
+            ],
+            out,
+            indent=2,
+        )
         out.write("\n")
     else:
         for row in rows:
-            size = row.get("bytes")
-            size_s = f"  {_format_bytes(size)}" if isinstance(size, int) and size >= 0 else ""
-            err_s = f"  {row['error']}" if row.get("error") else ""
-            print(f"{row['status']:<7} {row['tile']}{size_s}{err_s}", file=out)
-    return 0 if all(r["status"] != "fail" for r in rows) else 1
+            size_s = f"  {format_bytes(row.bytes)}" if isinstance(row.bytes, int) and row.bytes >= 0 else ""
+            err_s = f"  {row.error}" if row.error else ""
+            cached = "  cached" if row.cached else ""
+            print(f"{row.status:<7} {row.tile.name}{size_s}{err_s}{cached}", file=out)
+    return 0 if all(r.status != "fail" for r in rows) else 1
+
+
+def _cmd_status(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    tiles = resolve_selection(SelectionRequest.from_args(args))
+    output = Path(args.output)
+    local = scan_local(output)
+    catalog = Catalog.load(output)
+    states = {
+        t.name: classify_tile(
+            t,
+            local=local,
+            catalog_status=(catalog.get(t).status if catalog.get(t) else None),
+        )
+        for t in tiles
+    }
+    counts = {"present": 0, "unpublished": 0, "planned": 0, "failed": 0}
+    for state in states.values():
+        counts[state] = counts.get(state, 0) + 1
+    payload = {
+        "tiles": len(tiles),
+        "output": str(output),
+        "present": counts["present"],
+        "unpublished": counts["unpublished"],
+        "planned": counts["planned"],
+        "failed": counts["failed"],
+        "states": states,
+    }
+    if args.geojson:
+        json.dump(tiles_geojson(tiles, states), out, indent=2)
+        out.write("\n")
+        return 0
+    if args.json:
+        json.dump(payload, out, indent=2)
+        out.write("\n")
+    else:
+        print(
+            f"tiles={len(tiles)}  present={counts['present']}  "
+            f"unpublished={counts['unpublished']}  planned={counts['planned']}  "
+            f"failed={counts['failed']}  output={output}",
+            file=out,
+        )
+        if args.map:
+            print(render_map(tiles, states), file=out)
+    return 0
+
+
+def _cmd_verify(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    output = Path(args.output)
+    catalog = Catalog.load(output)
+    issues = verify_files(output, catalog)
+    if args.json:
+        json.dump([issue.__dict__ for issue in issues], out, indent=2)
+        out.write("\n")
+    elif not issues:
+        local = scan_local(output)
+        print(f"ok  {len(local)} webp file(s) in {output}", file=out)
+    else:
+        for issue in issues:
+            print(f"fail  {issue.name or '-'}  {issue.problem}", file=out)
+    return 1 if issues else 0
 
 
 def _cmd_install(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
@@ -436,34 +531,8 @@ def _cmd_install(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     return 1 if summary.failed or summary.errors else 0
 
 
-def _resolve_tiles(args: argparse.Namespace) -> List[Tile]:
-    groups: List[List[Tile]] = []
-    for key in args.theater:
-        groups.append(get_theater(key).tiles())
-    for box in args.bbox:
-        south, west, north, east = parse_bbox(box)
-        groups.append(tiles_from_bbox(south, west, north, east))
-    if args.tiles:
-        groups.append(parse_tile_list(args.tiles))
-    if args.from_file:
-        path = Path(args.from_file)
-        names = [
-            line.split("#", 1)[0].strip()
-            for line in path.read_text(encoding="utf-8").splitlines()
-        ]
-        groups.append(parse_tile_list(n for n in names if n))
-    if not groups:
-        known = ", ".join(sorted(THEATERS))
-        raise TileError(
-            "select tiles with --theater, --bbox, --tiles, or --from-file. "
-            f"Theaters: {known}"
-        )
-    return merge_tiles(*groups)
-
-
 def _confirm(prompt: str, err: TextIO) -> bool:
     if not sys.stdin.isatty():
-        # Non-interactive: honour --max-tiles as the safety gate; proceed.
         return True
     try:
         answer = input(prompt)
@@ -472,31 +541,21 @@ def _confirm(prompt: str, err: TextIO) -> bool:
     return answer.strip().lower() in {"y", "yes"}
 
 
-def _print_summary(summary: DownloadSummary, out: TextIO) -> None:
+def _print_summary(summary, out: TextIO) -> None:
+    extra = ""
+    if summary.cached_missing:
+        extra = f"  cached_missing={summary.cached_missing}"
     print(
         f"done in {summary.elapsed:.1f}s  "
         f"downloaded={summary.ok}  skipped={summary.skipped}  "
         f"missing={summary.missing}  failed={summary.failed}  "
-        f"bytes={_format_bytes(summary.bytes_written)}",
+        f"bytes={format_bytes(summary.bytes_written)}{extra}",
         file=out,
     )
     if summary.failed_results:
         print("failures:", file=out)
         for result in summary.failed_results:
             print(f"  {result.tile.filename}: {result.error}", file=out)
-
-
-def _format_bytes(n: Optional[int]) -> str:
-    if n is None:
-        return "?"
-    value = float(n)
-    for unit in ("B", "KiB", "MiB", "GiB"):
-        if abs(value) < 1024 or unit == "GiB":
-            if unit == "B":
-                return f"{int(value)} {unit}"
-            return f"{value:.1f} {unit}"
-        value /= 1024.0
-    return f"{n} B"
 
 
 if __name__ == "__main__":  # pragma: no cover

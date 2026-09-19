@@ -116,3 +116,65 @@ def test_probe_local_server(tile_server, capsys) -> None:
 def test_unknown_theater(capsys) -> None:
     assert main(["list", "--theater", "atlantis"]) == 2
     assert "unknown theater" in capsys.readouterr().err
+
+
+def test_status_and_verify(tmp_path: Path, capsys) -> None:
+    (tmp_path / "N24E054.webp").write_bytes(make_webp(400))
+    assert main(["status", "--theater", "hormuz", "-o", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "present=1" in out
+    assert "planned=" in out
+    assert main(["verify", "-o", str(tmp_path), "--json"]) == 0
+
+
+def test_list_pad(capsys) -> None:
+    assert main(["list", "--tiles", "N25E121", "--pad", "1", "--json"]) == 0
+    names = json.loads(capsys.readouterr().out)
+    assert len(names) == 9
+
+
+def test_download_json_and_catalog(tile_server, tmp_path: Path, capsys) -> None:
+    from cmo_tacview_tiles.constants import CATALOG_FILENAME
+
+    code = main(
+        [
+            "download",
+            "--tiles",
+            "N25E121,N10E010",
+            "--output",
+            str(tmp_path),
+            "--base-url",
+            tile_server.base_url,
+            "--retries",
+            "0",
+            "--yes",
+            "--json",
+        ]
+    )
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["downloaded"] == 1
+    assert payload["missing"] == 1
+    assert (tmp_path / CATALOG_FILENAME).is_file()
+    # second run should use the catalog for the 404
+    before = len(tile_server.requests)
+    assert (
+        main(
+            [
+                "download",
+                "--tiles",
+                "N10E010",
+                "--output",
+                str(tmp_path),
+                "--base-url",
+                tile_server.base_url,
+                "--retries",
+                "0",
+                "--yes",
+                "-q",
+            ]
+        )
+        == 0
+    )
+    assert "cached" in capsys.readouterr().out
+    assert len(tile_server.requests) == before

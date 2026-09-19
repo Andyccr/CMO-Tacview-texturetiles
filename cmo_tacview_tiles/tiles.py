@@ -5,7 +5,8 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
-from typing import Iterable, List, Sequence
+from pathlib import Path
+from typing import Iterable, List, Sequence, Tuple
 from urllib.parse import urljoin
 
 TILE_NAME_RE = re.compile(
@@ -191,3 +192,28 @@ def merge_tiles(*groups: Iterable[Tile]) -> List[Tile]:
     for group in groups:
         combined.extend(group)
     return unique_tiles(combined)
+
+
+def tiles_from_file(path: Path) -> List[Tile]:
+    """Load tile names from a text file (one per line, ``#`` comments)."""
+    names = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        piece = line.split("#", 1)[0].strip()
+        if piece:
+            names.append(piece)
+    return parse_tile_list(names)
+
+
+def expand_tiles(tiles: Sequence[Tile], pad: int) -> List[Tile]:
+    """Add every tile within Chebyshev distance ``pad`` of the set."""
+    if pad <= 0:
+        return unique_tiles(tiles)
+    extra: List[Tile] = []
+    for tile in tiles:
+        for dlat in range(-pad, pad + 1):
+            for dlon in range(-pad, pad + 1):
+                lat = tile.lat + dlat
+                lon = normalize_longitude(tile.lon + dlon)
+                if LAT_MIN <= lat <= LAT_MAX:
+                    extra.append(Tile(lat=lat, lon=lon))
+    return unique_tiles(extra)

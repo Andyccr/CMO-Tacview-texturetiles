@@ -1,4 +1,4 @@
-"""Concurrent tile downloader with resume, skip, and 404 handling."""
+"""Concurrent tile downloader with resume, skip, catalog, and 404 handling."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from typing import Callable, Iterable, List, Optional
 
 import requests
 
+from .catalog import Catalog
 from .constants import (
     CHUNK_SIZE,
     DEFAULT_BASE_URL,
@@ -30,6 +31,14 @@ class DownloadError(RuntimeError):
     """A single-tile download failed after retries."""
 
 
+@dataclass(frozen=True)
+class RemoteMeta:
+    exists: bool
+    size: Optional[int] = None
+    etag: Optional[str] = None
+    last_modified: Optional[str] = None
+
+
 @dataclass
 class DownloadResult:
     tile: Tile
@@ -38,6 +47,12 @@ class DownloadResult:
     bytes_written: int = 0
     error: Optional[str] = None
     elapsed: float = 0.0
+    etag: Optional[str] = None
+    cached: bool = False
+
+    @property
+    def remote_size(self) -> Optional[int]:
+        return self.bytes_written or None
 
 
 @dataclass
@@ -62,12 +77,41 @@ class DownloadSummary:
         return sum(1 for r in self.results if r.status == "fail")
 
     @property
+    def cached_missing(self) -> int:
+        return sum(1 for r in self.results if r.status == "missing" and r.cached)
+
+    @property
     def bytes_written(self) -> int:
         return sum(r.bytes_written for r in self.results)
 
     @property
     def failed_results(self) -> List[DownloadResult]:
         return [r for r in self.results if r.status == "fail"]
+
+    def to_dict(self) -> dict:
+        return {
+            "downloaded": self.ok,
+            "skipped": self.skipped,
+            "missing": self.missing,
+            "failed": self.failed,
+            "cached_missing": self.cached_missing,
+            "bytes": self.bytes_written,
+            "elapsed": round(self.elapsed, 3),
+            "failures": [
+                {"tile": r.tile.name, "error": r.error} for r in self.failed_results
+            ],
+        }
+
+
+@dataclass
+class ProbeResult:
+    tile: Tile
+    status: str  # ok | missing | fail
+    bytes: Optional[int] = None
+    etag: Optional[str] = None
+    error: Optional[str] = None
+    cached: bool = False
+    url: str = ""
 
 
 def download_tiles(
@@ -81,6 +125,9 @@ def download_tiles(
     skip_existing: bool = True,
     force: bool = False,
     dry_run: bool = False,
+    trust_local: bool = False,
+    skip_known_missing: bool = True,
+    catalog: Optional[Catalog] = None,
     on_result: Optional[ResultCallback] = None,
 ) -> DownloadSummary:
     """Download ``tiles`` into ``output_dir``.
@@ -109,6 +156,20 @@ def download_tiles(
             summary.results.append(result)
             done += 1
             current = done
+            if catalog is not None and result.error != "dry-run":
+                size = None
+                if result.path and result.path.exists():
+                    size = result.path.stat().st_size
+                elif result.bytes_written:
+                    size = result.bytes_written
+                recorded = "ok" if result.status == "skip" else result.status
+                catalog.record(
+                    result.tile,
+                    recorded,
+                    size=size,
+                    etag=result.etag,
+                    error=result.error if result.status == "fail" else None,
+                )
         if on_result is not None:
             on_result(result, current, total)
 
@@ -133,6 +194,9 @@ def download_tiles(
             timeout=timeout,
             retries=retries,
             skip_existing=skip_existing and not force,
+            trust_local=trust_local and not force,
+            skip_known_missing=skip_known_missing and not force,
+            catalog=catalog,
         )
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -164,26 +228,50 @@ def download_one(
     timeout: float = DEFAULT_TIMEOUT,
     retries: int = DEFAULT_RETRIES,
     skip_existing: bool = True,
+    trust_local: bool = False,
+    skip_known_missing: bool = True,
+    catalog: Optional[Catalog] = None,
 ) -> DownloadResult:
     started = time.perf_counter()
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     url = tile.url(base_url)
-    session = thread_session(retries=retries, timeout=timeout)
-    tmo = request_timeout(session, timeout)
     part = dest.with_name(dest.name + ".part")
 
+    if skip_known_missing and catalog is not None and catalog.is_known_missing(tile):
+        return DownloadResult(
+            tile=tile,
+            status="missing",
+            elapsed=time.perf_counter() - started,
+            cached=True,
+            error="catalog",
+        )
+
+    if trust_local and dest.exists() and dest.stat().st_size >= MIN_VALID_BYTES:
+        return DownloadResult(
+            tile=tile,
+            status="skip",
+            path=dest,
+            bytes_written=0,
+            elapsed=time.perf_counter() - started,
+        )
+
+    session = thread_session(retries=retries, timeout=timeout)
+    tmo = request_timeout(session, timeout)
+
     try:
-        remote_size = _head_size(session, url, tmo)
-        if remote_size is None:
+        remote = head_remote(session, url, tmo)
+        if not remote.exists:
             _cleanup(part)
             return DownloadResult(
                 tile=tile,
                 status="missing",
                 elapsed=time.perf_counter() - started,
+                etag=remote.etag,
             )
 
-        if skip_existing and dest.exists() and dest.stat().st_size == remote_size:
+        remote_size = remote.size if remote.size is not None else -1
+        if skip_existing and dest.exists() and remote_size > 0 and dest.stat().st_size == remote_size:
             _cleanup(part)
             return DownloadResult(
                 tile=tile,
@@ -191,6 +279,7 @@ def download_one(
                 path=dest,
                 bytes_written=0,
                 elapsed=time.perf_counter() - started,
+                etag=remote.etag,
             )
 
         written = _get_to_file(session, url, dest, part, remote_size, tmo)
@@ -200,6 +289,7 @@ def download_one(
             path=dest,
             bytes_written=written,
             elapsed=time.perf_counter() - started,
+            etag=remote.etag,
         )
     except DownloadError as exc:
         return DownloadResult(
@@ -217,34 +307,104 @@ def download_one(
         )
 
 
-def _head_size(session: requests.Session, url: str, timeout: float) -> Optional[int]:
-    """Return Content-Length, or None if the tile is missing.
+def probe_tiles(
+    tiles: Iterable[Tile],
+    *,
+    base_url: str = DEFAULT_BASE_URL,
+    workers: int = DEFAULT_WORKERS,
+    timeout: float = DEFAULT_TIMEOUT,
+    retries: int = DEFAULT_RETRIES,
+    catalog: Optional[Catalog] = None,
+    skip_known_missing: bool = True,
+) -> List[ProbeResult]:
+    tile_list = list(tiles)
+    if not tile_list:
+        return []
+    workers = max(1, min(int(workers), len(tile_list)))
+    results: List[ProbeResult] = []
+    lock = threading.Lock()
 
-    Some CDNs mishandle HEAD; a 405/501 falls back to a streamed GET.
-    """
+    def _job(tile: Tile) -> ProbeResult:
+        url = tile.url(base_url)
+        if skip_known_missing and catalog is not None and catalog.is_known_missing(tile):
+            return ProbeResult(tile=tile, status="missing", cached=True, url=url)
+        session = thread_session(retries=retries, timeout=timeout)
+        tmo = request_timeout(session, timeout)
+        try:
+            remote = head_remote(session, url, tmo)
+            if not remote.exists:
+                return ProbeResult(tile=tile, status="missing", etag=remote.etag, url=url)
+            return ProbeResult(
+                tile=tile,
+                status="ok",
+                bytes=remote.size,
+                etag=remote.etag,
+                url=url,
+            )
+        except (DownloadError, requests.RequestException) as exc:
+            return ProbeResult(tile=tile, status="fail", error=str(exc), url=url)
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(_job, tile) for tile in tile_list]
+        for future in as_completed(futures):
+            result = future.result()
+            with lock:
+                results.append(result)
+                if catalog is not None and result.status in {"ok", "missing"}:
+                    catalog.record(
+                        result.tile,
+                        result.status,
+                        size=result.bytes,
+                        etag=result.etag,
+                    )
+    order = {tile.name: i for i, tile in enumerate(tile_list)}
+    results.sort(key=lambda r: order.get(r.tile.name, 0))
+    return results
+
+
+def head_remote(session: requests.Session, url: str, timeout: float) -> RemoteMeta:
+    """HEAD a tile URL. 404 → ``exists=False``. 405/501 falls back to GET."""
     response = session.head(url, timeout=timeout, allow_redirects=True)
     if response.status_code == 404:
-        return None
+        return RemoteMeta(exists=False)
     if response.status_code in (405, 501):
         response.close()
-        return _probe_get_size(session, url, timeout)
+        return _probe_get_meta(session, url, timeout)
     if response.status_code >= 400:
         raise DownloadError(f"HEAD {url} -> HTTP {response.status_code}")
     length = response.headers.get("Content-Length")
+    etag = response.headers.get("ETag")
+    last_modified = response.headers.get("Last-Modified")
     if length is None:
-        return _probe_get_size(session, url, timeout)
-    return int(length)
+        meta = _probe_get_meta(session, url, timeout)
+        return RemoteMeta(
+            exists=meta.exists,
+            size=meta.size,
+            etag=etag or meta.etag,
+            last_modified=last_modified or meta.last_modified,
+        )
+    return RemoteMeta(
+        exists=True,
+        size=int(length),
+        etag=etag,
+        last_modified=last_modified,
+    )
 
 
-def _probe_get_size(session: requests.Session, url: str, timeout: float) -> Optional[int]:
+def _probe_get_meta(session: requests.Session, url: str, timeout: float) -> RemoteMeta:
     response = session.get(url, timeout=timeout, stream=True, allow_redirects=True)
     try:
         if response.status_code == 404:
-            return None
+            return RemoteMeta(exists=False)
         if response.status_code >= 400:
             raise DownloadError(f"GET {url} -> HTTP {response.status_code}")
         length = response.headers.get("Content-Length")
-        return int(length) if length is not None else -1
+        return RemoteMeta(
+            exists=True,
+            size=int(length) if length is not None else None,
+            etag=response.headers.get("ETag"),
+            last_modified=response.headers.get("Last-Modified"),
+        )
     finally:
         response.close()
 
