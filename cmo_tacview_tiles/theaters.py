@@ -78,6 +78,9 @@ _THEATER_LIST: List[Theater] = [
     _t("caribbean", "Caribbean / Venezuela", 8.0, -72.0, 18.0, -59.0, "Southern Caribbean and Venezuela"),
     _t("india-west", "Arabian Sea / West India", 8.0, 66.0, 25.0, 78.0, "Western India and Arabian Sea"),
     _t("india-east", "Bay of Bengal", 5.0, 78.0, 23.0, 95.0, "Eastern India, Bangladesh, Andaman"),
+    _t("okinawa", "Okinawa / Ryukyu", 24.0, 122.0, 28.0, 132.0, "Okinawa and Ryukyu chain"),
+    _t("aden", "Gulf of Aden", 11.0, 42.0, 16.0, 54.0, "Bab el-Mandeb, Aden, and north Somalia"),
+    _t("suwalki", "Suwalki Gap", 52.0, 20.0, 56.0, 26.0, "Suwalki corridor and Kaliningrad approaches"),
 ]
 
 THEATERS: Dict[str, Theater] = {t.key: t for t in _THEATER_LIST}

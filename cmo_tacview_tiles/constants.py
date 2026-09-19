@@ -11,8 +11,9 @@ DEFAULT_MAX_TILES = 400
 DEFAULT_CONFIRM_AFTER = 50
 CHUNK_SIZE = 64 * 1024
 MIN_VALID_BYTES = 256
+CATALOG_FILENAME = ".cmo_tiles_catalog.json"
 USER_AGENT = (
-    "CMO-Tacview-texturetiles/2.0 "
+    "CMO-Tacview-texturetiles/2.1 "
     "(+https://github.com/Andyccr/CMO-Tacview-texturetiles; personal CMO use)"
 )
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cmo-tacview-tiles"
-version = "2.0.0"
+version = "2.1.0"
 description = "Download CMO Sentinel-2 Tacview terrain texture tiles by theater or bounding box"
 readme = "README.md"
 requires-python = ">=3.9"

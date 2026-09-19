@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from cmo_tacview_tiles.tiles import (
@@ -100,3 +102,30 @@ def test_parse_bbox_and_list() -> None:
         parse_bbox("21,117,27")
     tiles = parse_tile_list(["N25E121, N25E122", "S09W070"])
     assert [t.name for t in tiles] == ["S09W070", "N25E121", "N25E122"]
+
+
+def test_expand_tiles_pad_one() -> None:
+    from cmo_tacview_tiles.tiles import expand_tiles
+
+    tiles = expand_tiles([parse_tile_name("N25E121")], 1)
+    assert len(tiles) == 9
+    assert parse_tile_name("N24E120") in tiles
+    assert parse_tile_name("N26E122") in tiles
+
+
+def test_expand_tiles_antimeridian() -> None:
+    from cmo_tacview_tiles.tiles import expand_tiles
+
+    tiles = expand_tiles([parse_tile_name("N00E179")], 1)
+    names = {t.name for t in tiles}
+    assert "N00W180" in names
+    assert "N00E178" in names
+
+
+def test_tiles_from_file(tmp_path: Path) -> None:
+    from cmo_tacview_tiles.tiles import tiles_from_file
+
+    path = tmp_path / "tiles.txt"
+    path.write_text("# comment\nN25E121\nN25E122.webp\n\n")
+    tiles = tiles_from_file(path)
+    assert [t.name for t in tiles] == ["N25E121", "N25E122"]
