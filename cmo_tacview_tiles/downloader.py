@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
@@ -25,6 +26,26 @@ from .session import request_timeout, thread_session
 from .tiles import Tile
 
 ResultCallback = Callable[["DownloadResult", int, int], None]
+LOG = logging.getLogger("cmo_tacview_tiles")
+
+
+class RateLimiter:
+    """Space out HTTP starts across worker threads."""
+
+    def __init__(self, interval: float = 0.0) -> None:
+        self.interval = max(0.0, float(interval))
+        self._lock = threading.Lock()
+        self._next = 0.0
+
+    def wait(self) -> None:
+        if self.interval <= 0:
+            return
+        with self._lock:
+            now = time.monotonic()
+            delay = self._next - now
+            self._next = max(now, self._next) + self.interval
+        if delay > 0:
+            time.sleep(delay)
 
 
 class DownloadError(RuntimeError):
@@ -128,6 +149,7 @@ def download_tiles(
     trust_local: bool = False,
     skip_known_missing: bool = True,
     catalog: Optional[Catalog] = None,
+    delay: float = 0.0,
     on_result: Optional[ResultCallback] = None,
 ) -> DownloadSummary:
     """Download ``tiles`` into ``output_dir``.
@@ -186,6 +208,8 @@ def download_tiles(
         summary.elapsed = time.perf_counter() - start
         return summary
 
+    limiter = RateLimiter(delay)
+
     def _job(tile: Tile) -> DownloadResult:
         return download_one(
             tile,
@@ -197,6 +221,7 @@ def download_tiles(
             trust_local=trust_local and not force,
             skip_known_missing=skip_known_missing and not force,
             catalog=catalog,
+            limiter=limiter,
         )
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -231,6 +256,7 @@ def download_one(
     trust_local: bool = False,
     skip_known_missing: bool = True,
     catalog: Optional[Catalog] = None,
+    limiter: Optional[RateLimiter] = None,
 ) -> DownloadResult:
     started = time.perf_counter()
     dest = Path(dest)
@@ -258,6 +284,9 @@ def download_one(
 
     session = thread_session(retries=retries, timeout=timeout)
     tmo = request_timeout(session, timeout)
+    if limiter is not None:
+        limiter.wait()
+    LOG.debug("HEAD %s", url)
 
     try:
         remote = head_remote(session, url, tmo)

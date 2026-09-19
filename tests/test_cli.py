@@ -15,7 +15,11 @@ def test_version() -> None:
     assert exc.value.code == 0
 
 
-def test_theaters_json(capsys) -> None:
+def test_theaters_query(capsys) -> None:
+    assert main(["theaters", "hormuz"]) == 0
+    out = capsys.readouterr().out
+    assert "hormuz" in out
+    assert "Strait of Hormuz" in out
     assert main(["theaters", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     keys = {row["key"] for row in payload}
@@ -178,3 +182,57 @@ def test_download_json_and_catalog(tile_server, tmp_path: Path, capsys) -> None:
     )
     assert "cached" in capsys.readouterr().out
     assert len(tile_server.requests) == before
+
+
+def test_sync_skips_local(tile_server, tmp_path: Path, capsys) -> None:
+    (tmp_path / "N25E121.webp").write_bytes(make_webp(1024, b"A"))
+    code = main(
+        [
+            "sync",
+            "--tiles",
+            "N25E121,N10E010",
+            "--output",
+            str(tmp_path),
+            "--base-url",
+            tile_server.base_url,
+            "--retries",
+            "0",
+            "--yes",
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "pending of 2" in out
+    assert (tmp_path / "N25E121.webp").exists()
+
+
+def test_clean_partials(tmp_path: Path, capsys) -> None:
+    part = tmp_path / "N25E121.webp.part"
+    part.write_bytes(b"partial")
+    assert main(["clean", "-o", str(tmp_path)]) == 0
+    assert not part.exists()
+    assert "removed" in capsys.readouterr().out
+
+
+def test_doctor_local_host(tile_server, tmp_path: Path, capsys) -> None:
+    code = main(
+        [
+            "doctor",
+            "-o",
+            str(tmp_path),
+            "--base-url",
+            tile_server.base_url,
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "host" in out
+    assert "ok" in out
+
+
+def test_list_uses_config_theater(tmp_path: Path, capsys) -> None:
+    ini = tmp_path / "cfg.ini"
+    ini.write_text("[defaults]\ntheater = hormuz\n", encoding="utf-8")
+    assert main(["list", "--config", str(ini), "--json"]) == 0
+    names = json.loads(capsys.readouterr().out)
+    assert "N24E054" in names

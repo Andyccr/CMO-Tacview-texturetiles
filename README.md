@@ -55,6 +55,13 @@ python -m cmo_tacview_tiles download --theater taiwan -o ./tacview_textures
 python -m cmo_tacview_tiles status --theater taiwan -o ./tacview_textures --map
 python -m cmo_tacview_tiles verify -o ./tacview_textures
 
+# 只补缺（跳过已有文件和已知 404）
+python -m cmo_tacview_tiles sync --theater taiwan -o ./tacview_textures
+
+# 环境自检 / 清理中断残留
+python -m cmo_tacview_tiles doctor
+python -m cmo_tacview_tiles clean -o ./tacview_textures
+
 # 按战区下载（推荐）
 python -m cmo_tacview_tiles download --theater taiwan -o ./tacview_textures
 
@@ -73,7 +80,17 @@ python -m cmo_tacview_tiles install --source ./tacview_textures --target "D:/Tac
 
 CMO 里看光标经纬度，取场景西南–东北两个角，填进 `--bbox` 即可。缺省一次最多 400 张，可用 `--max-tiles` 调整；默认 4 个并发，避免打满官方带宽。
 
-已下载且大小一致的文件会跳过，中断的 `.part` 会断点续传。404 是正常现象（海上或未发布的格子），会记成 `missing` 而不是失败，并写入输出目录里的 `.cmo_tiles_catalog.json`，下次不再重复探测。`--pad 1` 会多下一圈相邻格子。`--trust-local` 对已有文件跳过 HEAD。
+已下载且大小一致的文件会跳过，中断的 `.part` 会断点续传。404 是正常现象（海上或未发布的格子），会记成 `missing` 而不是失败，并写入输出目录里的 `.cmo_tiles_catalog.json`，下次不再重复探测。`--pad 1` 会多下一圈相邻格子。`--trust-local` 对已有文件跳过 HEAD。`sync` 只抓本地还没有、且目录里没记过 404 的格子。
+
+可选配置文件 `.cmo-tacview-tiles.ini`（或 `~/.config/cmo-tacview-tiles/config.ini`）：
+
+```ini
+[defaults]
+output = ./tacview_textures
+workers = 4
+theater = taiwan
+delay = 0.2
+```
 
 ### 内置战区
 
@@ -99,7 +116,10 @@ This release:
 - Skips complete files, resumes `.part` files, retries transient HTTP errors
 - Treats 404 as “tile not published”, not as a hard failure, and caches that in `.cmo_tiles_catalog.json`
 - `status` / `verify` / ASCII `--map` / GeoJSON for coverage
+- `sync` downloads only gaps; `doctor` checks the host; `clean` drops `.part` files
+- Optional INI config for default theater/output/workers (`--config` / `--no-config`)
 - `--pad` expands a theater by neighbouring 1° cells
+- `--delay` spaces HTTP starts so a run stays polite
 - Refuses oversized jobs (`--max-tiles`, default 400)
 - Copies tiles into Tacview/CMO folders (`install`)
 
@@ -114,6 +134,8 @@ Without installing:
 
 ```bash
 python -m cmo_tacview_tiles download --theater hormuz -o ./tacview_textures
+python -m cmo_tacview_tiles sync --theater hormuz -o ./tacview_textures
+python -m cmo_tacview_tiles doctor
 ```
 
 `multithreading.py` is kept as a thin wrapper around the same CLI so old
@@ -162,6 +184,7 @@ just the downloader (MIT).
 
 - Sidecar catalog remembers unpublished (404) tiles so later runs do not re-probe them
 - `status`, `verify`, `list --check`, ASCII `--map`, and GeoJSON coverage
+- `sync`, `doctor`, `clean`, INI config, `--delay`
 - `--pad`, `--trust-local`, `--retry-failed`, `--refresh-missing`
 - Concurrent `probe` with the same theater/bbox selectors as download
 - Extra theaters: `okinawa`, `aden`, `suwalki`

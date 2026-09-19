@@ -12,6 +12,7 @@ DEFAULT_CONFIRM_AFTER = 50
 CHUNK_SIZE = 64 * 1024
 MIN_VALID_BYTES = 256
 CATALOG_FILENAME = ".cmo_tiles_catalog.json"
+DEFAULT_DELAY = 0.0
 USER_AGENT = (
     "CMO-Tacview-texturetiles/2.1 "
     "(+https://github.com/Andyccr/CMO-Tacview-texturetiles; personal CMO use)"

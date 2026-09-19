@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence
+from typing import Iterable, List, Mapping, Optional, Sequence
 
 from .theaters import THEATERS, get_theater
 from .tiles import (
@@ -66,3 +66,23 @@ def resolve_selection(request: SelectionRequest) -> List[Tile]:
     if request.pad:
         tiles = expand_tiles(tiles, request.pad)
     return tiles
+
+
+def pending_tiles(
+    tiles: Sequence[Tile],
+    *,
+    local: Optional[Mapping[str, object]] = None,
+    catalog_missing: Optional[Sequence[str]] = None,
+    refresh_missing: bool = False,
+) -> List[Tile]:
+    """Tiles that still need a network fetch: not on disk, not a known 404."""
+    local = local or {}
+    missing = set(catalog_missing or [])
+    pending: List[Tile] = []
+    for tile in tiles:
+        if tile.name in local:
+            continue
+        if not refresh_missing and tile.name in missing:
+            continue
+        pending.append(tile)
+    return pending
